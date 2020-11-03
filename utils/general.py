@@ -23,7 +23,6 @@ from scipy.signal import butter, filtfilt
 from tqdm import tqdm
 
 from utils.torch_utils import init_seeds, is_parallel
-from detectron2.structures.masks import BitMasks
 from torch.nn import functional as F
 
 
@@ -458,24 +457,15 @@ def merge_bases(rois, coeffs, location_to_inds=None):
     return masks_preds.view(N, -1)
 
 
-def compute_loss(p, targets, model, bases=None, bboxes=None, attn=None, segs=None):  # predictions, targets, model
+def compute_loss(p, targets, model, bases=None, attn=None, segs=None):  # predictions, targets, model
     device = targets.device
 
     lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
     if segs is not None:
-        tcls, tbox, tseg, sbases, indices, anchors = build_targets_with_segs(p, targets, model, segs, bboxes, bases)
+        tcls, tbox, tseg, sbases, indices, anchors = build_targets_with_segs(p, targets, model, segs, bases)
         lmask = torch.zeros(1, device=device)
     else:
         tcls, tbox, indices, anchors = build_targets(p, targets, model)  # targets
-    """
-    print([t.shape for t in tcls])
-    print([t.shape for t in tbox])
-    print([t.shape for t in tseg])
-    print([t.shape for t in sbases])
-    print([t.shape for t in p])
-    print([t.shape for t in attn])
-    exit()
-    """
 
     h = model.hyp  # hyperparameters
 
@@ -551,19 +541,8 @@ def compute_loss(p, targets, model, bases=None, bboxes=None, attn=None, segs=Non
     return loss * bs, torch.cat(loss_collection).detach()
 
 
-def build_targets_with_segs(p, targets, model, segs, bboxes, bases):
-
-    # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
-    det = model.module.detect if is_parallel(model) else model.detect  # Detect()
-    na, nt = det.na, targets.shape[0]  # number of anchors, targets
-    tcls, tbox, tsegs, sbases, indices, anch = [], [], [], [], [], []
-
-    segs = segs.repeat(na, 1, 1, 1)
-    gain = torch.ones(7, device=targets.device)  # normalized to gridspace gain
-    ai = torch.arange(na, device=targets.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
-    targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)  # append anchor indices
-    bboxes = torch.cat([bb.tensor for bb in bboxes], 0).repeat(na, 1, 1)
-    bases = bases.repeat(na, 1, 1 ,1 ,1)
+def build_targets_with_segs(p, targets, model, segs, bases):
+    pre_gen_gains = [torch.tensor(pp.shape, device=targets.device)[[3, 2, 3, 2]] for pp in p]
 
     g = 0.5  # bias
     off = torch.tensor([[0, 0],
@@ -571,9 +550,19 @@ def build_targets_with_segs(p, targets, model, segs, bboxes, bases):
                         # [1, 1], [1, -1], [-1, 1], [-1, -1],  # jk,jm,lk,lm
                         ], device=targets.device).float() * g  # offsets
 
+    # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
+    det = model.module.detect if is_parallel(model) else model.detect  # Detect()
+    na, nt = det.na, targets.shape[0]  # number of anchors, targets
+    J_index = torch.arange(0, nt)
+    tcls, tbox, tsegs, sbases, indices, anch = [], [], [], [], [], []
+    J_index = J_index.repeat(na, 1)
+    gain = torch.ones(7, device=targets.device)  # normalized to gridspace gain
+    ai = torch.arange(na, device=targets.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
+    targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)  # append anchor indices
+
     for i in range(det.nl):
         anchors = det.anchors[i]
-        gain[2:6] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain
+        gain[2:6] = pre_gen_gains[i]  # xyxy gain
         # Match targets to anchors
         t = targets * gain
         if nt:
@@ -582,27 +571,22 @@ def build_targets_with_segs(p, targets, model, segs, bboxes, bases):
             j = torch.max(r, 1. / r).max(2)[0] < model.hyp['anchor_t']  # compare
             # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n)=wh_iou(anchors(3,2), gwh(n,2))
             t = t[j]  # filter
-            s = segs[j]
-            bbo = bboxes[j]
-            bas = bases[j]
-            bitmask = BitMasks(s)
-            s = bitmask.crop_and_resize(bbo, 56)
-
-            # Offsets
+            J = J_index[j]
             gxy = t[:, 2:4]  # grid xy
             gxi = gain[[2, 3]] - gxy  # inverse
             j, k = ((gxy % 1. < g) & (gxy > 1.)).T
             l, m = ((gxi % 1. < g) & (gxi > 1.)).T
             j = torch.stack((torch.ones_like(j), j, k, l, m))
-            t = t.repeat((5, 1, 1))[j]
-            s = s.repeat((5, 1, 1, 1))[j]
-            bas =  bas.repeat(5, 1, 1, 1, 1)[j]
+            t = t.repeat(5, 1, 1)[j]
+            J = J.repeat(5, 1)[j]
+            bas = bases[J]
+            s = segs[J]
             offsets = (torch.zeros_like(gxy)[None] + off[:, None])[j]
         else:
             t = targets[0]
             s = torch.zeros((1, 56, 56))
+            bas = torch.zeros((1, 4, 56, 56))
             offsets = 0
-
         # Define
         b, c = t[:, :2].long().T  # image, class
         gxy = t[:, 2:4]  # grid xy
@@ -622,6 +606,13 @@ def build_targets_with_segs(p, targets, model, segs, bboxes, bases):
 
 
 def build_targets(p, targets, model):
+
+    g = 0.5  # bias
+    off = torch.tensor([[0, 0],
+                        [1, 0], [0, 1], [-1, 0], [0, -1],  # j,k,l,m
+                        # [1, 1], [1, -1], [-1, 1], [-1, -1],  # jk,jm,lk,lm
+                        ], device=targets.device).float() * g  # offsets
+
     # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
     det = model.module.detect if is_parallel(model) else model.detect  # Detect()
     na, nt = det.na, targets.shape[0]  # number of anchors, targets
@@ -629,13 +620,6 @@ def build_targets(p, targets, model):
     gain = torch.ones(7, device=targets.device)  # normalized to gridspace gain
     ai = torch.arange(na, device=targets.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
     targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)  # append anchor indices
-
-
-    g = 0.5  # bias
-    off = torch.tensor([[0, 0],
-                        [1, 0], [0, 1], [-1, 0], [0, -1],  # j,k,l,m
-                        # [1, 1], [1, -1], [-1, 1], [-1, -1],  # jk,jm,lk,lm
-                        ], device=targets.device).float() * g  # offsets
 
     for i in range(det.nl):
         anchors = det.anchors[i]

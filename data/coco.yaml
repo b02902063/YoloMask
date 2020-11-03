@@ -2,7 +2,7 @@
 # Download script: data/get_coco2017.sh
 
 # train and val datasets (image directory or *.txt file with image paths)
-train: ./data/coco/debug.txt  # 118k images
+train: ./data/coco/train2017.txt  # 118k images
 val: ./data/coco/val2017.txt  # 5k images
 test: ./data/coco/testdev2017.txt  # 20k images for submission to https://competitions.codalab.org/competitions/20794
 

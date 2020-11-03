@@ -102,6 +102,7 @@ def create_coco_semantic_from_instance(instance_json, sem_seg_root, categories):
             output = os.path.join(images_root, file_name + '.jpg')
             output = os.path.join("data", output).replace('/', os.sep)
             yield anns, output, img
+    """
     # single process
     print("Start writing to {} ...".format(sem_seg_root))
     start = time.time()
@@ -110,11 +111,22 @@ def create_coco_semantic_from_instance(instance_json, sem_seg_root, categories):
             anno, oup, img, categories)
     print("Finished. time: {:.2f}s".format(time.time() - start))
     return
+    """
     whole_dict = {}
     for anno, oup, img in iter_annotations_for_polygon():
         h, w = (img["height"], img["width"])
         all_ann = []
+        bbox = []
         for ann in anno:
+            if ann["area"] == 0:
+                continue
+            cls = categories[ann["category_id"]]
+            b = ann["bbox"]
+            b.append(cls)
+            if b in bbox:
+                continue
+               
+            bbox.append(b)
             segm = ann['segmentation']
             new_ann = []
             for a in segm:
@@ -124,7 +136,7 @@ def create_coco_semantic_from_instance(instance_json, sem_seg_root, categories):
                     else:
                         a[i] /= w
                 new_ann.append(np.array(a))
-            all_ann.append(np.array(new_ann))
+            all_ann.append(new_ann)
         whole_dict[oup] = all_ann
     output_path = os.path.join(sem_seg_root, "output.pickle")
     with open(output_path, 'wb') as handle:

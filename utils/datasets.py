@@ -86,6 +86,8 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
 
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, 8])  # number of workers
+    print("created {} workers".format(nw))
+    #nw = 0
     train_sampler = torch.utils.data.distributed.DistributedSampler(dataset) if local_rank != -1 else None
     if mask:
         c_fn = LoadImagesAndLabelsAndSegmentations.collate_fn
@@ -364,7 +366,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         cache_path = str(Path(self.label_files[0]).parent) + '.cache'  # cached labels
         if os.path.isfile(cache_path):
             cache = torch.load(cache_path)  # load
-            if cache['hash'] != get_hash(self.label_files + self.img_files):  # dataset changed
+            if False and cache['hash'] != get_hash(self.label_files + self.img_files):  # dataset changed
                 cache = self.cache_labels(cache_path)  # re-cache
         else:
             cache = self.cache_labels(cache_path)  # cache
@@ -638,7 +640,6 @@ class LoadImagesAndLabelsAndSegmentations(LoadImagesAndLabels):
             self.segs = pickle.load(fp)
 
     def __getitem__(self, index):
-        random.seed(100)
         if self.image_weights:
             index = self.indices[index]
 
@@ -693,13 +694,14 @@ class LoadImagesAndLabelsAndSegmentations(LoadImagesAndLabels):
             # Apply cutouts
             # if random.random() < 0.9:
             #     labels = cutout(img, labels)
-
         nL = len(labels)  # number of labels
         if nL:
             temp = labels[:, 1:5].copy()
             labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])  # convert xyxy to xywh
             labels[:, [2, 4]] /= img.shape[0]  # normalized height 0-1
             labels[:, [1, 3]] /= img.shape[1]  # normalized width 0-1
+        else:
+            temp = np.array([])
         if self.augment:
             # flip up-down
             if random.random() < hyp['flipud']:
@@ -726,14 +728,6 @@ class LoadImagesAndLabelsAndSegmentations(LoadImagesAndLabels):
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
         img = np.ascontiguousarray(img)
 
-        if nL:
-            if self.augment:
-                temp *= self.img_size
-            else:
-                temp[:, [0, 2]] *= w
-                temp[:, [1, 3]] *= h
-        else:
-            temp = []
         return torch.from_numpy(img), torch.from_numpy(temp), segs_out, labels_out, self.img_files[index], shapes
 
     @staticmethod
@@ -804,7 +798,8 @@ def load_mosaic(self, index, mask=False):
     s = self.img_size
     yc, xc = s, s  # mosaic center x, y
     indices = [index] + [random.randint(0, len(self.labels) - 1) for _ in range(3)]  # 3 additional image indices
-
+    num_seg = []
+    all_file = []
     for i, index in enumerate(indices):
         # Load image
         img, _, (h, w) = load_image(self, index)
@@ -846,8 +841,11 @@ def load_mosaic(self, index, mask=False):
                     seg[i][j][::2] = seg[i][j][::2] * w + padw
                     seg[i][j][1::2] = seg[i][j][1::2] * h + padh
             seg4.extend(seg)
+            num_seg.append(len(seg))
 
         labels4.append(labels)
+        all_file.append(self.img_files[index])
+    num_label = [xxx.shape[0] for xxx in labels4]
     # Concat/clip labels
     if len(labels4):
         labels4 = np.concatenate(labels4, 0)
@@ -858,7 +856,6 @@ def load_mosaic(self, index, mask=False):
         # img4, labels4 = replicate(img4, labels4)
     # Augment
     # img4 = img4[s // 2: int(s * 1.5), s // 2:int(s * 1.5)]  # center crop (WARNING, requires box pruning)
-
     if mask and len(seg4) > 0:
         img4, labels4, seg4 = random_perspective(img4, labels4,
                                            degrees=self.hyp['degrees'],

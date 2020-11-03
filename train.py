@@ -29,6 +29,8 @@ from utils.google_utils import attempt_download
 from utils.torch_utils import init_seeds, ModelEMA, select_device, intersect_dicts
 
 from detectron2.modeling.poolers import ROIPooler
+from detectron2.structures.masks import BitMasks, PolygonMasks
+from detectron2.layers.roi_align import ROIAlign
 
 
 def train(hyp, opt, device, tb_writer=None):
@@ -153,35 +155,44 @@ def train(hyp, opt, device, tb_writer=None):
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt, hyp=hyp, augment=True,
                                             cache=opt.cache_images, rect=opt.rect, local_rank=rank,
                                             world_size=opt.world_size, nc=nc, mask=opt.mask)
-    output = next(iter(dataloader))
 
-    tt = time.time()
-    import profile
-    import pstats
-    import io
-    p = profile.Profile()
-    p.runcall(next, iter(dataloader))
-    print(time.time() - tt)
-    s = io.StringIO()
-    ps = pstats.Stats(p, stream=s).sort_stats("tottime")
-    ps.print_stats()
-    with open("mask.txt", "w+") as f:
-        f.write(s.getvalue())
-    exit()
+    # print("Data Loader created")
+    #
+    # pbar = enumerate(dataloader)
+    # pbar = tqdm(pbar, total=len(dataloader))
+    # for i, output in pbar:
+    #     pbar.set_description("Processing: ")
+    #
+    # exit()
+    #
+    # import profile
+    # import pstats
+    # import io
+    # p = profile.Profile()
+    # tt = time.time()
+    # p.runcall(next, iter(dataloader))
+    # print(time.time() - tt)
+    # s = io.StringIO()
+    # ps = pstats.Stats(p, stream=s).sort_stats("tottime")
+    # ps.print_stats()
+    # with open("mask.txt", "w+") as f:
+    #     f.write(s.getvalue())
+    # exit()
+    #
+    # print(time.time() - tt)
+    # exit()
+    #
+    #
+    # img, segs, label, path, shapes = dataset[0]
+    #
+    # print(img.shape)
+    # print(segs.shape)
+    # print(label)
+    # print(path)
+    # print(shapes)
+    #
+    # exit()
 
-    print(time.time() - tt)
-    exit()
-    """
-    img, segs, label, path, shapes = dataset[0]
-
-    print(img.shape)
-    print(segs.shape)
-    print(label)
-    print(path)
-    print(shapes)
-
-    exit()
-    """
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
     nb = len(dataloader)  # number of batches
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
@@ -237,6 +248,7 @@ def train(hyp, opt, device, tb_writer=None):
                            sampling_ratio=1,
                            pooler_type="ROIAlignV2",
                            canonical_level=2)
+        aligner = ROIAlign((56, 56), 1.0, 0, aligned=True)
     else:
         pooler = None
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
@@ -312,9 +324,12 @@ def train(hyp, opt, device, tb_writer=None):
                     # Loss
                     bboxes = [b.to(device) for b in bboxes]
                     pooled_bases = pooler([bases], bboxes)
+                    bboxes = torch.cat([bb.tensor for bb in bboxes], 0)
+                    segs = segs.to(device)
+                    segs = BitMasks(segs).crop_and_resize(bboxes, 56)
+                    loss, loss_items = compute_loss(pred, targets.to(device), model, bases=pooled_bases, attn=attn, segs=segs)  # scaled by batch_size
 
-                    loss, loss_items = compute_loss(pred, targets.to(device), model, bases=pooled_bases, bboxes=bboxes,
-                                                    attn=attn, segs=segs.to(device))  # scaled by batch_size
+
                     if rank != -1:
                         loss *= opt.world_size  # gradient averaged between devices in DDP mode
                     # if not torch.isfinite(loss):
