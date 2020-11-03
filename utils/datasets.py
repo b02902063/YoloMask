@@ -366,7 +366,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         cache_path = str(Path(self.label_files[0]).parent) + '.cache'  # cached labels
         if os.path.isfile(cache_path):
             cache = torch.load(cache_path)  # load
-            if False and cache['hash'] != get_hash(self.label_files + self.img_files):  # dataset changed
+            if cache['hash'] != get_hash(self.label_files + self.img_files):  # dataset changed
                 cache = self.cache_labels(cache_path)  # re-cache
         else:
             cache = self.cache_labels(cache_path)  # cache
@@ -721,7 +721,7 @@ class LoadImagesAndLabelsAndSegmentations(LoadImagesAndLabels):
         labels_out = torch.zeros((nL, 6))
         if nL:
             labels_out[:, 1:] = torch.from_numpy(labels)
-            segs_out = torch.from_numpy(segs)
+            segs_out = torch.from_numpy(segs.copy())
         else:
             segs_out = torch.from_numpy(np.empty(shape=(0, img.shape[0], img.shape[1]), dtype=segs.dtype))
         # Convert
